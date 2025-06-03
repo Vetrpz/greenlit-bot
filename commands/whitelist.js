@@ -1,35 +1,16 @@
 // commands/whitelist.js
 // =======================================================================
-// This slash command (/whitelist) allows a buyer to redeem a license key
-// to be whitelisted for a specific system (e.g., Speeders, Lightsabers, etc.).
+// Slash command (/whitelist) to redeem a license key for a system. Supports
+// both Payhip‐issued keys and GEN‐prefixed (locally generated) keys.
 //
-// We support two kinds of license keys:
-//
-//   1) Payhip-issued keys: These exist in Payhip’s backend and must be
-//      verified via Payhip’s License Verify API.
-//
-//   2) GEN-prefixed keys: Created locally via /generate_key. We skip
-//      Payhip verification for these and treat them as valid immediately.
-//
-// Steps performed here:
-//   1) Read buyer’s Discord ID and provided Roblox UserID.
-//   2) Read provided licenseKey.
-//   3) Check if that key exists in pending_licenses.json (unredeemed).
-//   4) If the key does NOT start with “GEN-”, verify it with Payhip’s API.
-//   5) Enforce a 30-day cooldown if the user has redeemed the same system recently.
-//   6) Insert/update user in “users” table (store Discord ↔ Roblox ID).
-//   7) Insert a purchase record in “purchases” table with cooldown timestamp.
-//   8) Assign the corresponding “Buyer” role in Discord.
-//   9) Append Roblox ID to the appropriate whitelist_<system>.json file.
-//  10) Remove the license from pending_licenses.json so it cannot be reused.
-//  11) Log this action in the “logs” table.
-//  12) Reply with instructions for the buyer (which Roblox group + next steps).
+// After successful redemption, it logs into the “logs” channel if enabled.
 // =======================================================================
 
 const { SlashCommandBuilder } = require("discord.js");
 const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
+const { log } = require("../utils/logger"); // Import the logging helper
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -50,10 +31,10 @@ module.exports = {
 
   async execute(interaction, context) {
     // ------------------------------
-    // 1) DESTRUCTURE CONTEXT & ARGS
+    // 1) Extract arguments & context
     // ------------------------------
     const {
-      config, // contains SYSTEMS array and COOLDOWN_MS
+      config,
       db: {
         addUser,
         updateUserRoblox,
@@ -63,21 +44,20 @@ module.exports = {
         getPurchasesByUser,
         updateCooldown,
         deletePurchase,
-        addLog,
+        addLog
       },
-      PAYHIP_API_KEY, // from .env
-      client,         // Discord client
+      PAYHIP_API_KEY,
+      client
     } = context;
 
     const discordId = interaction.user.id;
     const robloxId = interaction.options.getString("roblox_id").trim();
     const licenseKey = interaction.options.getString("license_key").trim();
 
-    // Defer reply so we can do async work (ephemeral = only user sees this)
     await interaction.deferReply({ ephemeral: true });
 
     // ------------------------------
-    // 2) LOAD pending_licenses.json
+    // 2) Load pending_licenses.json
     // ------------------------------
     const pendingPath = path.join(__dirname, "..", "pending_licenses.json");
     let pending = {};
@@ -85,48 +65,42 @@ module.exports = {
       pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
     }
 
-    // 3) CHECK THAT LICENSE KEY IS PENDING (i.e. not already used)
+    // 3) Check that the provided key is pending (unredeemed)
     const record = pending[licenseKey];
     if (!record) {
       return interaction.editReply(
         "❌ That license key was not recognized or already redeemed."
       );
     }
-    // record.system tells us which system (e.g. "Blasters")
 
     // ------------------------------
-    // 4) VERIFY PAYHIP (UNLESS GEN- prefix)
+    // 4) Verify with Payhip unless it’s a GEN- key
     // ------------------------------
-    let verifyData = { valid: true }; // default “valid” for GEN- keys
+    let verifyData = { valid: true }; // assume valid for GEN- keys
     const isGeneratedKey = licenseKey.startsWith("GEN-");
 
     if (!isGeneratedKey) {
-      // Only call Payhip if key is not GEN-…
       try {
         const response = await axios.get(
           "https://payhip.com/api/v1/license/verify",
           {
             params: {
-              product_key: record.system, // must exactly match config.SYSTEMS[*].name
-              license_key: licenseKey,
+              product_key: record.system,
+              license_key: licenseKey
             },
             headers: {
-              Authorization: PAYHIP_API_KEY,
-            },
+              Authorization: PAYHIP_API_KEY
+            }
           }
         );
-        verifyData = response.data; // { valid: true/false, … }
+        verifyData = response.data; // { valid: true/false, ... }
       } catch (err) {
-        if (err.response) {
-          console.error(
-            "❌ Payhip responded with status",
-            err.response.status,
-            "and data:",
-            err.response.data
-          );
-        } else {
-          console.error("❌ Error verifying license with Payhip:", err.message);
-        }
+        console.error(
+          "❌ Payhip responded with status",
+          err.response?.status,
+          "and data:",
+          err.response?.data
+        );
         return interaction.editReply(
           "❌ Could not verify license right now. Please try again later."
         );
@@ -140,7 +114,7 @@ module.exports = {
     }
 
     // ------------------------------
-    // 5) ENSURE NO DUPLICATE REDEMPTION IN OUR OWN DATABASE
+    // 5) Check our own DB to ensure the key wasn’t already redeemed
     // ------------------------------
     const existing = getPurchaseByKey.get(licenseKey);
     if (existing) {
@@ -150,12 +124,15 @@ module.exports = {
     }
 
     // ------------------------------
-    // 6) ENFORCE 30-DAY COOLDOWN FOR THE SAME SYSTEM
+    // 6) 30‐day cooldown check for this system
     // ------------------------------
     const now = Date.now();
     const userPurchases = getPurchasesByUser.all(discordId);
     for (const p of userPurchases) {
-      if (p.system === record.system && now < p.cooldown_ends_at) {
+      if (
+        p.system === record.system &&
+        now < p.cooldown_ends_at
+      ) {
         const daysLeft = Math.ceil(
           (p.cooldown_ends_at - now) / (1000 * 60 * 60 * 24)
         );
@@ -166,19 +143,19 @@ module.exports = {
     }
 
     // ------------------------------
-    // 7) INSERT OR UPDATE “users” TABLE
+    // 7) Insert or update “users” table with Discord ↔ Roblox ID
     // ------------------------------
     addUser.run(discordId, now);
     updateUserRoblox.run(robloxId, discordId);
 
     // ------------------------------
-    // 8) ADD PURCHASE ROW IN “purchases” TABLE
+    // 8) Add a row to “purchases” table
     // ------------------------------
     const cooldownEndsAt = now + config.COOLDOWN_MS;
     addPurchase.run(discordId, record.system, licenseKey, now, cooldownEndsAt);
 
     // ------------------------------
-    // 9) ASSIGN “Buyer” ROLE IN DISCORD
+    // 9) Assign the system’s “Buyer” role in Discord
     // ------------------------------
     const sysEntry = config.SYSTEMS.find((s) => s.name === record.system);
     if (sysEntry) {
@@ -187,12 +164,15 @@ module.exports = {
         const member = await guild.members.fetch(discordId);
         await member.roles.add(sysEntry.roleId);
       } catch (err) {
-        console.warn(`⚠️ Could not assign role for system ${record.system}:`, err);
+        console.warn(
+          `⚠️ Could not assign role for system ${record.system}:`,
+          err
+        );
       }
     }
 
     // ------------------------------
-    // 10) APPEND Roblox ID TO whitelist_<system>.json
+    // 10) Append Roblox ID to whitelist_<system>.json
     // ------------------------------
     const filePath = path.join(__dirname, "..", sysEntry.file);
     let whitelistArray = [];
@@ -205,20 +185,28 @@ module.exports = {
     }
 
     // ------------------------------
-    // 11) REMOVE LICENSE FROM pending_licenses.json
+    // 11) Remove the key from pending_licenses.json
     // ------------------------------
     delete pending[licenseKey];
     fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
 
     // ------------------------------
-    // 12) LOG THE ACTION IN “logs” TABLE
+    // 12) Log the action in the “logs” DB table
     // ------------------------------
     addLog.run("whitelist_redeemed", discordId, robloxId, record.system, now);
 
+    // ──────────────────────────────────────────────────
+    // Log to the Discord “logs” channel (if enabled)
+    // ──────────────────────────────────────────────────
+    await log(
+      context,
+      `✅ **WHITELIST_REDEEMED**: <@${discordId}> (Roblox ID: ${robloxId}) redeemed \`${licenseKey}\` for **${record.system}**.`
+    );
+
     // ------------------------------
-    // 13) SEND FINAL CONFIRMATION TO USER
+    // 13) Finally, send confirmation to the buyer
     // ------------------------------
-    const groupId = sysEntry.groupId; // Roblox numeric group ID
+    const groupId = sysEntry.groupId;
     return interaction.editReply({
       content:
         `✅ You are now whitelisted for **${record.system}**!\n` +
@@ -226,5 +214,5 @@ module.exports = {
         `https://www.roblox.com/groups/${groupId}\n` +
         `➡️ After you click “Join Group” in Roblox, run \`/join_sync ${record.system}\`.`
     });
-  },
+  }
 };

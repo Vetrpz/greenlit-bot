@@ -1,148 +1,93 @@
 // commands/revoke.js
 // =======================================================================
-// Admin-only command to revoke a user’s whitelist entry.
-// Usage: /revoke <target> [system]
-//
-// - <target> can be a Discord ID, a Roblox ID, or a license key.
-// - If [system] is provided, only revoke that system; otherwise revoke ALL systems for that user.
+// Slash command (/revoke) to remove (“revoke”) a user’s whitelist for a
+// particular system. After revoking, it logs into the “logs” channel.
 // =======================================================================
 
-const { SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
+const { SlashCommandBuilder } = require("discord.js");
 const fs = require("fs");
 const path = require("path");
+const { log } = require("../utils/logger"); // Import the logging helper
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("revoke")
-    .setDescription("Revoke a user’s whitelist (all or specific system) (Admin only).")
-    .addStringOption((opt) =>
+    .setDescription("Revoke a user’s whitelist for a system.")
+    .addUserOption((opt) =>
       opt
-        .setName("target")
-        .setDescription("Discord ID, Roblox ID, or license key")
+        .setName("user")
+        .setDescription("The Discord user whose whitelist to revoke")
         .setRequired(true)
     )
     .addStringOption((opt) =>
       opt
         .setName("system")
-        .setDescription("If provided, revoke only that specific system")
-        .setRequired(false)
-    )
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+        .setDescription("Which system to revoke from (e.g. Lightsabers)")
+        .setRequired(true)
+    ),
 
   async execute(interaction, context) {
-    // Destructure what we need from context
     const {
+      db: { getUser, getPurchaseByKey, deletePurchase, addLog },
       config,
-      db: { getPurchasesByUser, getUser, getPurchaseByKey, deletePurchase, addLog }
     } = context;
-    const { client } = context; // Discord client to remove roles
 
-    // 1) Get arguments: target can be a Discord ID, Roblox ID, or license key; systemFilter is optional
-    const target = interaction.options.getString("target").trim();
-    const systemFilter = interaction.options.getString("system"); // may be null
+    const targetUser = interaction.options.getUser("user");
+    const system = interaction.options.getString("system");
 
-    await interaction.deferReply({ ephemeral: true }); // acknowledge command
+    await interaction.deferReply({ ephemeral: true });
 
-    // ===== HELPER: remove a single purchase record =====
-    async function removePurchase(purchase) {
-      const discordId = purchase.discord_id;
-      const robloxId = purchase.roblox_user_id;
-      const sysName = purchase.system; // e.g. "Lightsabers"
-
-      // 1a) Remove Roblox ID from the local whitelist JSON
-      const entry = config.SYSTEMS.find((s) => s.name === sysName);
-      if (entry) {
-        const filePath = path.join(__dirname, "..", entry.file);
-        if (fs.existsSync(filePath)) {
-          let arr = JSON.parse(fs.readFileSync(filePath, "utf8"));
-          // Filter out the robloxId; create a new array without it
-          arr = arr.filter((id) => id !== robloxId);
-          fs.writeFileSync(filePath, JSON.stringify(arr, null, 2));
-        }
-
-        // 1b) Remove the Discord Buyer role for that system
-        try {
-          const guild = client.guilds.cache.get(process.env.DISCORD_GUILD_ID);
-          const member = await guild.members.fetch(discordId);
-          await member.roles.remove(entry.roleId);
-        } catch (err) {
-          console.warn(`⚠️ Could not remove role for ${discordId}:`, err);
-        }
-      }
-
-      // 2) Delete the purchase row from the purchases table
-      deletePurchase.run(purchase.license_key);
-
-      // 3) Log the revoke action
-      addLog.run("revoke", interaction.user.id, robloxId, sysName, Date.now());
-    }
-
-    // === 2) Check if target matches a license key ===
-    const licensePurchase = getPurchaseByKey.get(target);
-    if (licensePurchase) {
-      // If systemFilter is provided, ensure it matches
-      if (systemFilter && licensePurchase.system !== systemFilter) {
-        return interaction.editReply(
-          `❌ That license belongs to **${licensePurchase.system}**, not **${systemFilter}**.`
-        );
-      }
-      // Remove exactly this purchase record
-      await removePurchase(licensePurchase);
+    // Find the system entry
+    const sysEntry = config.SYSTEMS.find((s) => s.name === system);
+    if (!sysEntry) {
       return interaction.editReply(
-        `✅ Revoked whitelist for **${licensePurchase.system}** (license: \`${licensePurchase.license_key}\`).`
+        `❌ Unknown system “${system}.”`
       );
     }
 
-    // === 3) Not a license key: try interpreting target as Discord ID ===
-    let discordId = null;
-    const userRow = getUser.get(target);
-    if (userRow) {
-      discordId = userRow.discord_id;
-    } else {
-      // === 4) Not a Discord ID: try as Roblox ID by scanning all purchases ===
-      const allPurchases = getPurchasesByUser.all(); // returns entire purchases table
-      const match = allPurchases.find((p) => p.roblox_user_id === target);
-      if (match) {
-        discordId = match.discord_id;
+    // Get Discord ID of the target
+    const discordId = targetUser.id;
+
+    // Look up that user’s Roblox ID from the “users” table
+    const userRow = getUser.get(discordId);
+    if (!userRow || !userRow.roblox_id) {
+      return interaction.editReply(
+        `❌ <@${discordId}> has no Roblox ID on file. Cannot revoke.`
+      );
+    }
+    const robloxId = userRow.roblox_id;
+
+    // Remove the user’s Roblox ID from whitelist_<system>.json
+    const filePath = path.join(__dirname, "..", sysEntry.file);
+    if (fs.existsSync(filePath)) {
+      let whitelistArray = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      whitelistArray = whitelistArray.filter((id) => id !== robloxId);
+      fs.writeFileSync(filePath, JSON.stringify(whitelistArray, null, 2));
+    }
+
+    // Remove any purchase row for that user & system
+    // (We store purchases by license key, so find by Discord ID+system)
+    const purchases = getPurchaseByKey.all(discordId);
+    for (const p of purchases) {
+      if (p.system === system) {
+        deletePurchase.run(p.license_key);
       }
     }
 
-    if (!discordId) {
-      // We couldn’t identify the user or license
-      return interaction.editReply(
-        "❌ No user or license found with that identifier."
-      );
-    }
+    // Log the revoke in the “logs” DB table
+    const now = Date.now();
+    addLog.run("revoke", discordId, robloxId, system, now);
 
-    // 5) Fetch all purchases for that Discord ID
-    let userPurchases = getPurchasesByUser.all(discordId);
-    if (!userPurchases.length) {
-      return interaction.editReply("❌ That user has no active whitelist entries.");
-    }
+    // ──────────────────────────────────────────────────
+    // Log to Discord channel if enabled
+    // ──────────────────────────────────────────────────
+    await log(
+      context,
+      `❌ **REVOKE**: <@${discordId}> (Roblox ID: ${robloxId}) had **${system}** revoked.`
+    );
 
-    // 6) If systemFilter is provided, filter to that system only
-    if (systemFilter) {
-      userPurchases = userPurchases.filter((p) => p.system === systemFilter);
-      if (!userPurchases.length) {
-        return interaction.editReply(
-          `❌ That user does not have a whitelist for **${systemFilter}**.`
-        );
-      }
-    }
-
-    // 7) Revoke each matching purchase
-    for (const p of userPurchases) {
-      await removePurchase(p);
-    }
-
-    if (systemFilter) {
-      return interaction.editReply(
-        `✅ Revoked **${systemFilter}** from user <@${discordId}>.`
-      );
-    } else {
-      return interaction.editReply(
-        `✅ Revoked **all** whitelist entries from user <@${discordId}>.`
-      );
-    }
+    return interaction.editReply({
+      content: `✅ Revoked **${system}** from <@${discordId}>.`
+    });
   }
 };

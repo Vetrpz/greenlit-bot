@@ -1,21 +1,11 @@
 // commands/rolesync.js
 // =======================================================================
-// Slash command (/rolesync) to re-sync a user’s “Buyer” roles based on
-// their purchase history in the database. This helps if a user has lost
-// their role or re-joined the server.
-//
-// Steps performed here:
-// 1) Read the invoking user’s Discord ID.
-// 2) Query the “purchases” table for all systems this user has ever bought.
-// 3) Build a set of system names the user currently owns (no cooldown check).
-// 4) Fetch the GuildMember object for the user.
-// 5) For each system defined in config.SYSTEMS:
-//    a) If the user owns that system but doesn’t have the corresponding role, add it.
-//    b) If the user does NOT own that system but still has the “Buyer” role, remove it.
-// 6) Report back to the user which roles were added or removed (or say “No changes”).
+// Slash command (/rolesync) to resynchronize a user’s “Buyer” roles based
+// on their purchase history. Logs the changes into the “logs” channel.
 // =======================================================================
 
 const { SlashCommandBuilder } = require("discord.js");
+const { log } = require("../utils/logger"); // Import the logging helper
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -29,26 +19,21 @@ module.exports = {
       config
     } = context;
 
-    // 1) Defer reply since this may take a moment
     await interaction.deferReply({ ephemeral: true });
-
-    // 2) Gather the invoking user’s Discord ID
     const discordId = interaction.user.id;
 
-    // 3) Query the database for every purchase row for this user
-    //    (returns an array of rows, each with fields: id, discord_id, system, license_key, verified_at, cooldown_ends_at)
+    // 1) Fetch all purchase rows for this user
     const userPurchases = getPurchasesByUser.all(discordId);
 
-    // 4) Build a Set of system names the user has purchased at least once
+    // 2) Build a Set of system names the user owns
     const ownedSystems = new Set();
     for (const purchase of userPurchases) {
       ownedSystems.add(purchase.system);
     }
 
-    // 5) Fetch the GuildMember object so we can add/remove roles
+    // 3) Fetch the GuildMember so we can add/remove roles
     let member;
     try {
-      // Replace with your actual guild ID or use process.env.DISCORD_GUILD_ID
       const guild = client.guilds.cache.get(process.env.DISCORD_GUILD_ID);
       if (!guild) {
         throw new Error("Guild not found in client cache.");
@@ -61,8 +46,7 @@ module.exports = {
       );
     }
 
-    // 6) Loop through every system defined in config.SYSTEMS
-    //    and decide whether to add or remove the Buyer role
+    // 4) Loop through each system and add/remove roles accordingly
     const rolesAdded = [];
     const rolesRemoved = [];
 
@@ -72,7 +56,7 @@ module.exports = {
       const shouldHaveRole = ownedSystems.has(systemName);
 
       if (shouldHaveRole && !hasRole) {
-        // a) User owns this system but is missing the role → add it
+        // User owns this system but is missing the role → add it
         try {
           await member.roles.add(roleId);
           rolesAdded.push(systemName);
@@ -83,7 +67,7 @@ module.exports = {
           );
         }
       } else if (!shouldHaveRole && hasRole) {
-        // b) User does NOT own this system but still has the role → remove it
+        // User does NOT own this system but still has the role → remove it
         try {
           await member.roles.remove(roleId);
           rolesRemoved.push(systemName);
@@ -94,11 +78,10 @@ module.exports = {
           );
         }
       }
-      // If shouldHaveRole && hasRole → do nothing (already correct)
-      // If !shouldHaveRole && !hasRole → do nothing (already correct)
+      // If shouldHaveRole && hasRole, or !shouldHaveRole && !hasRole, do nothing.
     }
 
-    // 7) Construct a reply summarizing what changed
+    // 5) Construct a reply summarizing changes
     let replyContent = "";
     if (rolesAdded.length === 0 && rolesRemoved.length === 0) {
       replyContent = "✅ Your roles are already up-to-date—no changes needed.";
@@ -115,7 +98,19 @@ module.exports = {
       }
     }
 
-    // 8) Send the final ephemeral reply to the user
+    // 6) Log this rolesync to the “logs” channel if enabled
+    if (rolesAdded.length > 0 || rolesRemoved.length > 0) {
+      await log(
+        context,
+        `🔄 **ROLESYNC**: <@${discordId}> had roles **added**: [${rolesAdded.join(
+          ", "
+        )}] and **removed**: [${rolesRemoved.join(", ")}].`
+      );
+    } else {
+      await log(context, `🔄 **ROLESYNC**: <@${discordId}> had no role changes.`);
+    }
+
+    // 7) Send the ephemeral reply to the user
     return interaction.editReply(replyContent);
-  },
+  }
 };
