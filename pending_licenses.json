@@ -1,0 +1,27 @@
+{
+  "773F-CF8D-AE30-393A-8E80-B6BE-2226-7B37": {
+    "email": "MANUAL",
+    "system": "Ship System",
+    "timestamp": 1748906961209
+  },
+  "EA34-EA0A-8E7F-4116-3A45-84D0-7F59-1973": {
+    "email": "MANUAL",
+    "system": "Lightsabers",
+    "timestamp": 1748974926403
+  },
+  "1F39-2E78-0C7F-CE10-055D-FFAC-CF43-4D13": {
+    "email": "MANUAL",
+    "system": "Lightsabers",
+    "timestamp": 1748977138390
+  },
+  "54A6-6A47-FC6F-3DD0-A6C4-6BA6-C820-BCE2": {
+    "email": "MANUAL",
+    "system": "Blasters",
+    "timestamp": 1748977457357
+  },
+  "0446-7113-FFEB-22E0-A436-649D-99EF-6659": {
+    "email": "MANUAL",
+    "system": "Blasters",
+    "timestamp": 1748977679927
+  }
+}
