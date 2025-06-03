@@ -1,49 +1,103 @@
 // commands/logs.js
 // =======================================================================
-// Admin-only command to retrieve recent whitelist-related log entries.
-// Usage: /logs [limit]
+// Slash command (/logs) to configure the bot’s logging channel and toggle logs on/off.
 //
-// - limit (optional): the number of log entries to show (default 10).
+// Subcommands:
+//   /logs set <channel>   – Saves that channel ID in settings.json.
+//   /logs enable          – Enables logging.
+//   /logs disable         – Disables logging.
+//
+// All state is stored in settings.json (next to index.js):
+//   {
+//     "logsEnabled": boolean,
+//     "logsChannelId": string|null
+//   }
 // =======================================================================
 
-const { SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
+const { SlashCommandBuilder } = require("discord.js");
+const { loadSettings, saveSettings } = require("../utils/logger");
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("logs")
-    .setDescription("Show recent whitelist-related actions (Admin only)")
-    .addIntegerOption((opt) =>
-      opt
-        .setName("limit")
-        .setDescription("Number of log entries to show (default 10)")
-        .setRequired(false)
+    .setDescription("Configure the bot’s logging channel and turn logs on/off.")
+    // Subcommand: set <channel>
+    .addSubcommand((sub) =>
+      sub
+        .setName("set")
+        .setDescription("Set the text channel where log messages will be sent.")
+        .addChannelOption((opt) =>
+          opt
+            .setName("channel")
+            .setDescription("Select a text channel for logs")
+            .setRequired(true)
+        )
     )
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    // Subcommand: enable
+    .addSubcommand((sub) =>
+      sub
+        .setName("enable")
+        .setDescription("Enable sending logs to the configured channel.")
+    )
+    // Subcommand: disable
+    .addSubcommand((sub) =>
+      sub
+        .setName("disable")
+        .setDescription("Disable sending logs to the configured channel.")
+    ),
 
   async execute(interaction, context) {
-    const { db: { getRecentLogs } } = context;
-    const limit = interaction.options.getInteger("limit") || 10; // use provided limit or default to 10
+    // Load current settings from disk
+    const settings = loadSettings();
 
-    // 1) Query the logs table for the most recent `limit` entries
-    const rows = getRecentLogs.all(limit);
-    if (!rows.length) {
+    // Determine which subcommand was used
+    const sub = interaction.options.getSubcommand();
+
+    if (sub === "set") {
+      // -------------------------------
+      // /logs set <channel>
+      // -------------------------------
+      const channel = interaction.options.getChannel("channel");
+
+      // Save that channel’s ID
+      settings.logsChannelId = channel.id;
+      saveSettings(settings);
+
       return interaction.reply({
-        content: "No logs to display.",
+        content: `✅ Logs channel set to ${channel}.`,
         ephemeral: true
       });
     }
 
-    // 2) Format each row into a readable line
-    const lines = rows.map((r) => {
-      return (
-        `• [<t:${Math.floor(r.timestamp / 1000)}:f>] **${r.action_type}** – ` +
-        `actor: \`${r.actor_id}\` – target: \`${r.target_id}\` – system: \`${r.system}\``
-      );
-    });
+    if (sub === "enable") {
+      // -------------------------------
+      // /logs enable
+      // -------------------------------
+      settings.logsEnabled = true;
+      saveSettings(settings);
 
-    // 3) Reply with the lines (ephemeral so only Admin sees)
+      return interaction.reply({
+        content: `✅ Logging has been **enabled**.`,
+        ephemeral: true
+      });
+    }
+
+    if (sub === "disable") {
+      // -------------------------------
+      // /logs disable
+      // -------------------------------
+      settings.logsEnabled = false;
+      saveSettings(settings);
+
+      return interaction.reply({
+        content: `✅ Logging has been **disabled**.`,
+        ephemeral: true
+      });
+    }
+
+    // This should never run, but just in case:
     return interaction.reply({
-      content: ["**Recent Actions:**", ...lines].join("\n"),
+      content: "❌ Unknown subcommand for /logs.",
       ephemeral: true
     });
   }
